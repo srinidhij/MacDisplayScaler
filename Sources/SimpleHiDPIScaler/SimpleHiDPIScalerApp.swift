@@ -120,14 +120,12 @@ final class MenuBarViewModel: ObservableObject {
             showsHiDPIOnlyNote = false
             availableModes = manager.modes(for: virtualID)
             currentMode = manager.currentMode(for: virtualID)
-            options = [
-                ScalingOption(title: "Native", logicalWidth: 3440, logicalHeight: 1440,
-                              matchedMode: DisplayModeInfo(width: 3440, height: 1440, pixelWidth: 6880, pixelHeight: 2880, refreshRate: 60)),
-                ScalingOption(title: "Larger", logicalWidth: 3008, logicalHeight: 1264,
-                              matchedMode: DisplayModeInfo(width: 3008, height: 1264, pixelWidth: 6016, pixelHeight: 2528, refreshRate: 60)),
-                ScalingOption(title: "Much Larger", logicalWidth: 2560, logicalHeight: 1080,
-                              matchedMode: DisplayModeInfo(width: 2560, height: 1080, pixelWidth: 5120, pixelHeight: 2160, refreshRate: 60)),
-            ]
+            options = Self.privateSizes.map { size in
+                ScalingOption(title: size.title, logicalWidth: size.width, logicalHeight: size.height,
+                              matchedMode: DisplayModeInfo(width: size.width, height: size.height,
+                                                           pixelWidth: size.width * 2, pixelHeight: size.height * 2,
+                                                           refreshRate: 60))
+            }
             if selectedLogicalWidth == nil { selectedLogicalWidth = 3440 }
             return
         }
@@ -149,19 +147,12 @@ final class MenuBarViewModel: ObservableObject {
     func applySelected() {
         // Private path: switch the VIRTUAL display's mode; the mirrored
         // physical panel keeps its 3440x1440 timing while the UI scales.
-        if privateModeActive, let virtualID = privateActiveVirtualID,
+        if privateModeActive, privateActiveVirtualID != nil,
+           let physicalID = selectedDisplayID,
            let width = selectedLogicalWidth,
-           let option = options.first(where: { $0.logicalWidth == width }),
-           let target = option.matchedMode
+           let size = Self.privateSizes.first(where: { $0.width == width })
         {
-            pendingPrevious = manager.currentMode(for: virtualID)
-            let code = manager.applyMode(target, for: virtualID)
-            if code != 0 {
-                statusMessage = "Virtual display refused the mode (error \(code))."
-                return
-            }
-            currentMode = manager.currentMode(for: virtualID)
-            startPrivateCountdown(physicalID: selectedDisplayID ?? 0, virtualID: virtualID, previous: pendingPrevious)
+            switchPrivateSize(physicalID: physicalID, size: size)
             return
         }
         guard let id = selectedDisplayID,
@@ -281,9 +272,10 @@ final class MenuBarViewModel: ObservableObject {
         statusMessage = "Creating private virtual display…"
         // Creation polls for the new display (blocking sleeps), so it runs
         // off-main; UI updates resume on MainActor when it completes.
+        let size = Self.privateSizes.first(where: { $0.width == selectedLogicalWidth }) ?? Self.privateSizes[1]
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                PrivateHiDPIGateway.enable(physicalDisplayID: id)
+                PrivateHiDPIGateway.enable(physicalDisplayID: id, logicalWidth: size.width, logicalHeight: size.height)
             }.value
             self.privateBusy = false
             switch result {
@@ -300,6 +292,39 @@ final class MenuBarViewModel: ObservableObject {
                 }
                 AppLogger.shared.error("display=\(id) private enable failed: \(e)")
                 self.refreshPrivateStatus()
+            }
+        }
+    }
+
+    /// "Looks like" sizes offered on the private path (2x backing each).
+    /// Smaller logical size = larger UI on the 3440x1440 panel.
+    static let privateSizes: [(title: String, width: Int, height: Int)] = [
+        ("Native", 3440, 1440),
+        ("Larger", 3008, 1264),
+        ("Larger+", 2752, 1152),
+        ("Much Larger", 2560, 1080),
+    ]
+
+    /// The virtual's modes can't be switched while mirrored, so a size change
+    /// re-creates the virtual. The 10-s rollback tears down if not confirmed.
+    private func switchPrivateSize(physicalID: CGDirectDisplayID, size: (title: String, width: Int, height: Int)) {
+        guard !privateBusy else { return }
+        privateBusy = true
+        statusMessage = "Switching to \(size.width)×\(size.height)…"
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                PrivateHiDPIGateway.enable(physicalDisplayID: physicalID, logicalWidth: size.width, logicalHeight: size.height)
+            }.value
+            self.privateBusy = false
+            switch result {
+            case .success(let r):
+                AppLogger.shared.info("display=\(physicalID) private virtual=\(r.virtualDisplayID) size=\(size.width)x\(size.height)")
+                self.refresh()
+                self.startPrivateCountdown(physicalID: physicalID, virtualID: r.virtualDisplayID, previous: nil, isEnableRollback: true)
+            case .failure(let e):
+                AppLogger.shared.error("display=\(physicalID) size switch failed: \(e)")
+                self.statusMessage = "Size switch failed: \(e). Panel restored."
+                self.refresh()
             }
         }
     }

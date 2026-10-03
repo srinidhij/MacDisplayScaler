@@ -198,6 +198,25 @@ public enum PrivateHiDPIGateway: Sendable {
         }
     }
 
+    /// Change the "looks like" size of an active private display. The virtual's
+    /// mode list is not switchable while mirrored (verified live), so this tears
+    /// down (restoring the panel) and re-creates the virtual with only the
+    /// requested size, which then becomes its default mode.
+    public static func enable(
+        physicalDisplayID: UInt32,
+        logicalWidth: Int,
+        logicalHeight: Int
+    ) -> Result<PrivateHiDPIResult, PrivateHiDPIError> {
+        if virtualDisplay(forPhysical: physicalDisplayID) != nil {
+            disable(physicalDisplayID: physicalDisplayID)
+            Thread.sleep(forTimeInterval: 1.0) // let WindowServer finish teardown
+        }
+        return enable(
+            physicalDisplayID: physicalDisplayID,
+            logicalModes: [(logicalWidth, logicalHeight, 120), (logicalWidth, logicalHeight, 60)]
+        )
+    }
+
     /// Legacy single-mode entry point kept for the test suite + callers that
     /// only need "give me HiDPI or refuse". With opt-in off it refuses; with
     /// opt-in on it ensures the shared virtual exists and reports the requested
