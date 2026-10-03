@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  SimpleHiDPIScaler requests NO special entitlements.
+	  - No com.apple.security.network.* (no network, verified by absence).
+	  - No Screen Recording / Accessibility / Input Monitoring.
+	  - No camera / microphone / contacts / keychain / file access.
+	  - App Sandbox may be enabled at packaging time; display enumeration
+	    and CGDisplaySetDisplayMode among already-exposed modes need no
+	    additional entitlement. This file intentionally stays empty so any
+	    future permission request is a loud, reviewable diff.
+	-->
+</dict>
+</plist>
