@@ -40,6 +40,12 @@ public struct DisplayInfo: Identifiable, Equatable, Hashable, Sendable {
     /// Heuristic match for the primary target: Dell U3425WE (3440x1440 ultrawide).
     /// Dell vendor number is 0x10AC. Model/serial vary by firmware/connection,
     /// so we match on vendor + native pixels + name hint, never on ID alone.
+    /// Our own private virtual display (vendor "SH", model "HI" — see
+    /// PrivateHiDPIGateway). Survives process death, unlike name/map checks.
+    public var isOwnVirtual: Bool {
+        vendorNumber == 0x5348 && modelNumber == 0x4849
+    }
+
     public var looksLikeDellU3425WE: Bool {
         let isDellVendor = vendorNumber == 0x10AC
         let isUWQHD = nativePixelWidth == 3440 && nativePixelHeight == 1440

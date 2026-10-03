@@ -64,10 +64,7 @@ final class MenuBarViewModel: ObservableObject {
     /// Physical displays only. Private virtuals are status, never targets:
     /// applying a public 1x mode to a virtual destroys its HiDPI-ness.
     var physicalDisplays: [DisplayInfo] {
-        let staleVirtualIDs = Set(PrivateHiDPIGateway.activeMap.values)
-        return displays.filter { d in
-            !staleVirtualIDs.contains(d.id) && !d.name.hasPrefix("SimpleHiDPI")
-        }
+        displays.filter { !$0.isOwnVirtual }
     }
 
     func refresh() {
@@ -76,10 +73,7 @@ final class MenuBarViewModel: ObservableObject {
         // Never auto-select a private virtual display as the physical target
         // (in-process map plus name prefix, since stale virtuals from dead
         // processes are not in this process's map).
-        let staleVirtualIDs = Set(PrivateHiDPIGateway.activeMap.values)
-        let physical = displays.filter { d in
-            !staleVirtualIDs.contains(d.id) && !d.name.hasPrefix("SimpleHiDPI")
-        }
+        let physical = physicalDisplays
         if selectedDisplayID == nil
             || physicalDisplays.first(where: { $0.id == selectedDisplayID }) == nil
         {
@@ -97,7 +91,7 @@ final class MenuBarViewModel: ObservableObject {
 
     func selectDisplay(_ id: CGDirectDisplayID) {
         if let d = displays.first(where: { $0.id == id }),
-           d.name.hasPrefix("SimpleHiDPI") || PrivateHiDPIGateway.activeMap.values.contains(id)
+           d.isOwnVirtual || PrivateHiDPIGateway.activeMap.values.contains(id)
         {
             statusMessage = "Virtual displays can't be targeted. Select the physical Dell."
             return
@@ -164,7 +158,7 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         // Defense in depth: the public path must never target a virtual display.
-        if selectedDisplay?.name.hasPrefix("SimpleHiDPI") == true
+        if selectedDisplay?.isOwnVirtual == true
             || PrivateHiDPIGateway.activeMap.values.contains(id)
         {
             statusMessage = "That is a virtual display, not a panel. Select the physical Dell."
@@ -255,7 +249,7 @@ final class MenuBarViewModel: ObservableObject {
             return
         }
         // Never mirror a virtual display onto itself (observed mirrorFailed).
-        if let name = selectedDisplay?.name, name.hasPrefix("SimpleHiDPI") {
+        if selectedDisplay?.isOwnVirtual == true {
             statusMessage = "Select the physical DELL U3425WE, not the SimpleHiDPI virtual."
             return
         }

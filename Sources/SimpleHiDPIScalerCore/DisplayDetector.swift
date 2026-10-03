@@ -3,19 +3,20 @@ import CoreGraphics
 import Foundation
 
 /// Live display discovery using ONLY public APIs:
-/// CGGetActiveDisplayList, CGDisplayVendorNumber/ModelNumber/SerialNumber,
+/// CGGetOnlineDisplayList (not Active: a mirror slave, i.e. the physical panel
+/// while the private virtual is up, is online but inactive), CGDisplayVendorNumber/ModelNumber/SerialNumber,
 /// CGDisplayPixelsWide/High, CGMainDisplayID, NSScreen for human names.
 public final class DisplayDetector: DisplayDetecting, Sendable {
     public init() {}
 
     public func activeDisplays() -> [DisplayInfo] {
         var count: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else {
             return []
         }
         var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
         var fetched: UInt32 = 0
-        guard CGGetActiveDisplayList(count, &ids, &fetched) == .success else {
+        guard CGGetOnlineDisplayList(count, &ids, &fetched) == .success else {
             return []
         }
         let mainID = CGMainDisplayID()
