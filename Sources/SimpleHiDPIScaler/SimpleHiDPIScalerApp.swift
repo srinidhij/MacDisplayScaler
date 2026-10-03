@@ -138,6 +138,17 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    /// Row click. On the private path a size is applied immediately (the old
+    /// select-then-Apply flow was hidden behind the Keep countdown); on the
+    /// public path it only selects, and Apply commits.
+    func choose(_ option: ScalingOption) {
+        AppLogger.shared.info("row click \(option.logicalWidth)x\(option.logicalHeight) private=\(privateModeActive) busy=\(privateBusy)")
+        selectedLogicalWidth = option.logicalWidth
+        if privateModeActive, !privateBusy {
+            applySelected()
+        }
+    }
+
     func applySelected() {
         // Private path: switch the VIRTUAL display's mode; the mirrored
         // physical panel keeps its 3440x1440 timing while the UI scales.
@@ -306,6 +317,8 @@ final class MenuBarViewModel: ObservableObject {
     /// re-creates the virtual. The keep-timeout rollback tears down if not confirmed.
     private func switchPrivateSize(physicalID: CGDirectDisplayID, size: (title: String, width: Int, height: Int)) {
         guard !privateBusy else { return }
+        rollback.confirm() // a stale rollback must not fire mid-switch
+        stopCountdown()
         privateBusy = true
         statusMessage = "Switching to \(size.width)×\(size.height)…"
         Task {
@@ -470,7 +483,7 @@ struct MenuBarView: View {
                         Image(systemName: viewModel.selectedLogicalWidth == option.logicalWidth
                             ? "circle.inset.filled" : "circle")
                         Button(option.title) {
-                            viewModel.selectedLogicalWidth = option.logicalWidth
+                            viewModel.choose(option)
                         }
                         .buttonStyle(.plain)
                         .disabled(!option.isAvailable)
