@@ -479,20 +479,24 @@ struct MenuBarView: View {
                 Divider()
                 Text("Scaling:").font(.subheadline).bold()
                 ForEach(viewModel.options) { option in
-                    HStack {
-                        Image(systemName: viewModel.selectedLogicalWidth == option.logicalWidth
-                            ? "circle.inset.filled" : "circle")
-                        Button(option.title) {
-                            viewModel.choose(option)
+                    // Whole row is the hit target (a text-only button missed most clicks).
+                    Button {
+                        viewModel.choose(option)
+                    } label: {
+                        HStack {
+                            Image(systemName: viewModel.selectedLogicalWidth == option.logicalWidth
+                                ? "circle.inset.filled" : "circle")
+                            Text(option.title)
+                            Spacer()
+                            Text(option.isAvailable
+                                ? "\(option.matchedMode!.logicalLabel)\(option.matchedMode!.isHiDPI ? " HiDPI" : "")"
+                                : "not exposed by macOS")
+                            .font(.caption).foregroundStyle(.secondary)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(!option.isAvailable)
-                        Spacer()
-                        Text(option.isAvailable
-                            ? "\(option.matchedMode!.logicalLabel)\(option.matchedMode!.isHiDPI ? " HiDPI" : "")"
-                            : "not exposed by macOS")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .disabled(!option.isAvailable)
                     .opacity(option.isAvailable ? 1.0 : 0.5)
                 }
 
