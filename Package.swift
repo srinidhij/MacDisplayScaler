@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .executable(name: "SimpleHiDPIScaler", targets: ["SimpleHiDPIScaler"]),
         .executable(name: "SelfTest", targets: ["SelfTest"]),
+        .executable(name: "LiveProbe", targets: ["LiveProbe"]),
         .library(name: "SimpleHiDPIScalerCore", targets: ["SimpleHiDPIScalerCore"]),
     ],
     targets: [
@@ -29,6 +30,11 @@ let package = Package(
             name: "SelfTest",
             dependencies: ["SimpleHiDPIScalerCore"],
             path: "Sources/SelfTest"
+        ),
+        .executableTarget(
+            name: "LiveProbe",
+            dependencies: ["SimpleHiDPIScalerCore"],
+            path: "Sources/LiveProbe"
         ),
         .testTarget(
             name: "SimpleHiDPIScalerTests",

@@ -49,6 +49,9 @@ public enum PrivateHiDPIGateway: Sendable {
     private static let lock = NSLock()
     private static var _active: [UInt32: UInt32] = [:] // physical -> virtual
     private static var _creating = false
+    /// Panel mode captured before mirroring, re-applied on teardown. Process
+    /// exit does NOT revert a mirror configuration, so this is the only restore.
+    private static var _savedModes: [UInt32: CGDisplayMode] = [:]
 
     // MARK: - Opt-in (default OFF)
 
@@ -158,6 +161,7 @@ public enum PrivateHiDPIGateway: Sendable {
             PrivateVirtualDisplayDestroy(outID)
             return .failure(.creationFailed(-20))
         }
+        let savedMode = CGDisplayCopyDisplayMode(CGDirectDisplayID(physicalDisplayID))
         let mirrorRC = Int32(PrivateMirrorPhysicalOntoVirtual(physicalDisplayID, outID))
         guard mirrorRC == 0 else {
             PrivateVirtualDisplayDestroy(outID)
@@ -165,21 +169,32 @@ public enum PrivateHiDPIGateway: Sendable {
         }
         lock.lock()
         _active[physicalDisplayID] = outID
+        if let savedMode { _savedModes[physicalDisplayID] = savedMode }
         lock.unlock()
         return .success(PrivateHiDPIResult(virtualDisplayID: outID, physicalDisplayID: physicalDisplayID))
     }
 
-    /// Kill-switch: unmirror + destroy the virtual display for `physicalDisplayID`.
-    /// Safe to call when nothing is active. Also used by the 10-s rollback.
+    /// Single teardown primitive: unmirror, wait for the mirror set to clear,
+    /// destroy the virtual, then re-apply the panel mode captured before
+    /// mirroring. Safe to call when nothing is active. Used by the kill-switch,
+    /// the 10-s rollback and restore-defaults.
     public static func disable(physicalDisplayID: UInt32) {
-        let virtual: UInt32? = {
+        let (virtual, saved): (UInt32?, CGDisplayMode?) = {
             lock.lock(); defer { lock.unlock() }
-            return _active.removeValue(forKey: physicalDisplayID)
+            return (_active.removeValue(forKey: physicalDisplayID),
+                    _savedModes.removeValue(forKey: physicalDisplayID))
         }()
-        // Unmirror first so the panel returns to standalone, then destroy.
+        let did = CGDirectDisplayID(physicalDisplayID)
         _ = PrivateMirrorPhysicalOntoVirtual(physicalDisplayID, 0)
+        let deadline = Date().addingTimeInterval(2.0)
+        while CGDisplayIsInMirrorSet(did) != 0, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
         if let v = virtual {
             PrivateVirtualDisplayDestroy(v)
+        }
+        if let saved {
+            _ = CGDisplaySetDisplayMode(did, saved, nil)
         }
     }
 
