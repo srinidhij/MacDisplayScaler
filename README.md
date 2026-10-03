@@ -7,6 +7,13 @@ downsampled to the panel.
 
 No network, no telemetry, no accounts, no special permissions.
 
+## Why
+
+I wanted larger, sharp text on my ultrawide without relying on a closed-source
+app that has to be trusted with my display configuration. So I built this: a
+small open-source tool whose code you can read, with no network access, no
+telemetry and no special permissions.
+
 ## How it works
 
 The app creates a virtual display at the "looks like" size you pick (rendered
