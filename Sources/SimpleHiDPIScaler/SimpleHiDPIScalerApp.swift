@@ -245,7 +245,7 @@ final class MenuBarViewModel: ObservableObject {
         }
         // Single-flight: rapid retries collide in WindowServer (observed -13).
         guard !rollback.isArmed, countdown == 0 else {
-            statusMessage = "Wait for the current 10-s countdown to finish first."
+            statusMessage = "Wait for the current countdown to finish first."
             return
         }
         // Never mirror a virtual display onto itself (observed mirrorFailed).
@@ -275,7 +275,7 @@ final class MenuBarViewModel: ObservableObject {
             switch result {
             case .success(let r):
                 AppLogger.shared.info("display=\(id) private virtual=\(r.virtualDisplayID) created+mirrored")
-                self.statusMessage = "Private HiDPI active (virtual \(r.virtualDisplayID)). Confirm within 10 s."
+                self.statusMessage = "Private HiDPI active (virtual \(r.virtualDisplayID)). Confirm within \(Self.keepTimeoutSeconds) s."
                 self.refresh()
                 self.startPrivateCountdown(physicalID: id, virtualID: r.virtualDisplayID, previous: nil, isEnableRollback: true)
             case .failure(let e):
@@ -290,6 +290,9 @@ final class MenuBarViewModel: ObservableObject {
         }
     }
 
+    /// Seconds the user has to click Keep before the change rolls back.
+    static let keepTimeoutSeconds = 30
+
     /// "Looks like" sizes offered on the private path (2x backing each).
     /// Smaller logical size = larger UI on the 3440x1440 panel.
     static let privateSizes: [(title: String, width: Int, height: Int)] = [
@@ -300,7 +303,7 @@ final class MenuBarViewModel: ObservableObject {
     ]
 
     /// The virtual's modes can't be switched while mirrored, so a size change
-    /// re-creates the virtual. The 10-s rollback tears down if not confirmed.
+    /// re-creates the virtual. The keep-timeout rollback tears down if not confirmed.
     private func switchPrivateSize(physicalID: CGDirectDisplayID, size: (title: String, width: Int, height: Int)) {
         guard !privateBusy else { return }
         privateBusy = true
@@ -334,7 +337,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     /// Auto-enable once per launch when the user has opted in (persisted).
-    /// Fresh installs still default to OFF. Always arms the 10-s rollback,
+    /// Fresh installs still default to OFF. Always arms the keep-timeout rollback,
     /// so an unattended launch safely tears down instead of sticking.
     private func maybeAutoEnablePrivate() {
         guard !didAutoEnableThisLaunch else { return }
@@ -363,10 +366,10 @@ final class MenuBarViewModel: ObservableObject {
                 self.stopCountdown()
                 self.refresh()
             }
-        }, timeoutSeconds: 10)
-        countdown = 10
+        }, timeoutSeconds: Self.keepTimeoutSeconds)
+        countdown = Self.keepTimeoutSeconds
         if !isEnableRollback {
-            statusMessage = "Confirm within 10 s or the previous virtual mode returns."
+            statusMessage = "Confirm within \(Self.keepTimeoutSeconds) s or the previous virtual mode returns."
         }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -396,9 +399,9 @@ final class MenuBarViewModel: ObservableObject {
                 self.stopCountdown()
                 self.reloadModes()
             }
-        }, timeoutSeconds: 10)
-        countdown = 10
-        statusMessage = "Confirm within 10 s or the previous mode returns."
+        }, timeoutSeconds: Self.keepTimeoutSeconds)
+        countdown = Self.keepTimeoutSeconds
+        statusMessage = "Confirm within \(Self.keepTimeoutSeconds) s or the previous mode returns."
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
