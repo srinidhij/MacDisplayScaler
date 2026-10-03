@@ -1,209 +1,72 @@
-# SimpleHiDPIScaler — Architecture, APIs, Permissions, Risks, PoC, Test plan
+# Architecture
 
-This document is the technically honest core of the project: **what macOS
-allows, what it does not, and what this proof of concept therefore does.**
-It was written before any private API was touched; §2b/§4/§5 now also record
-the subsequently user-approved private prototype and everything learned
-debugging it live.
+## Pipeline
 
-## 1. Architecture
+1. A virtual display is created with only the requested "looks like" size
+   (`hiDPI = 1`, 120 Hz and 60 Hz variants), so the size is its default mode.
+2. The physical panel is raised to its fastest native refresh rate, then its
+   mode is saved.
+3. The panel is mirrored onto the virtual display with
+   `CGConfigureDisplayMirrorOfDisplay`. The panel is driven at the virtual's 2x
+   backing size and downsampled to its native 3440×1440.
+4. Teardown (`disable()`): unmirror → wait for the mirror set to clear →
+   destroy the virtual → re-apply the saved panel mode.
+
+Changing size is `disable()` followed by `enable()` at the new size.
+
+## Components
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ MenuBarUI (SwiftUI MenuBarExtra + MenuBarViewModel)     │  UI only. CG work via
-│  physical-only picker · virtual-target guards ·         │  manager/gateway.
-│  opt-in toggle · kill-switch · 10-s countdowns          │
-└──────────────┬──────────────────────┬───────────────────┘
-               │ DisplayManaging      │ PrivateHiDPIGateway (opt-in)
-┌──────────────▼──────────────────────▼───────────────────┐
-│ DisplayManager (facade)                                 │  refresh / apply / restore
-│  ├─ DisplayDetector   (DisplayDetecting)                │  CGGetActiveDisplayList,
-│  │                       vendor/model/serial, NSScreen  │  CGDisplayVendorNumber…
-│  ├─ DisplayModeManager (DisplayModeManaging)            │  CGDisplayCopyAllDisplayModes,
-│  │                       current, verified set          │  CGDisplayCopyDisplayMode,
-│  ├─ ScalingManager    (ScalingManaging)                 │  CGDisplaySetDisplayMode
-│  │                       desired→exposed, HiDPI-required│  pure logic, testable
-│  ├─ ConfigurationStore (ConfigurationStoring)           │  UserDefaults only
-│  ├─ RollbackManager    (RollbackManaging)               │  10 s confirm-or-restore
-│  └─ AppLogger                                          │  unified log + local file
-└─────────────────────────────────────────────────────────┘
-  PrivateBridge (ObjC, runtime-resolved, no link-time dependency)
-   PrivateVirtualDisplayAvailable / Create / Destroy / MirrorPhysicalOntoVirtual
+MenuBarView / MenuBarViewModel      SwiftUI UI; display picker, size rows, Keep countdown
+  DisplayManager                    facade: refresh, modes, apply, restore
+    DisplayDetector                 CGGetOnlineDisplayList (includes mirrored panels)
+    DisplayModeManager              list / current / verified mode set
+    ScalingManager                  matches desired sizes to exposed modes
+    ConfigurationStore              UserDefaults: launch-time mode, last selection
+    RollbackManager                 confirm-or-restore timer
+    AppLogger                       unified log + ~/Library/Logs/SimpleHiDPIScaler.log
+  PrivateHiDPIGateway               enable / disable lifecycle, active-size tracking
+  PrivateDefaultStore               saved default size, applied at launch
+PrivateBridge (ObjC)                virtual-display create/destroy, mirror/unmirror
 ```
 
-- Every collaborator is behind a protocol so tests inject fakes; no test
-  touches a real display (SelfTest uses fakes exclusively).
-- `DisplayManager.applyMode` saves nothing itself — callers snapshot
-  `currentMode` first (the ViewModel does), then `RollbackManager` owns the
-  10-second window.
-- `ScalingManager` never invents modes. Desired logical sizes (3440×1440,
-  3008×1264, 2560×1080) are matched against `allModes` with a 3% tolerance
-  for GPU rounding; unmatched rows render as "not exposed by macOS".
-  **Scaling rows (Larger/Much Larger) additionally REQUIRE `isHiDPI`** —
-  a plain 2560×1080 mode is a resolution change, not scaling, and must never
-  match (regression observed live: the panel dropped to 2560 plain).
-- The picker lists **physical panels only** (excludes in-process virtual IDs
-  plus `SimpleHiDPI*` names, since stale virtuals from dead processes are not
-  in this process's map). Public apply and private enable both refuse virtual
-  IDs with a message.
-- Display names come from `NSScreen`, which goes generic under mirroring
-  ("Display 3"); `isDellUWQHD` (vendor `0x10AC` + 3440×1440) backs up the
-  strict name-based `looksLikeDellU3425WE` with a "Possible Dell" label.
+- Collaborators sit behind protocols so tests inject fakes; no test touches a
+  real display.
+- The virtual display is identified by vendor `0x5348` / model `0x4849`, which
+  survives process restarts.
+- The bridge keeps each virtual display's descriptor alive with it and sets a
+  termination handler, which prunes the gateway's state when a virtual ends.
+- Creation uses a unique serial per virtual display, a dedicated dispatch queue,
+  and waits for the display to come online before mirroring. Only one creation
+  runs at a time.
+- Error codes from the bridge: `-10` begin, `-11`/`-12` configure, `-13`
+  commit, `-20` never came online, `-30` creation already in flight, `-5`
+  self-mirror.
 
-## 2. Required APIs
+## Persistence
 
-### 2a. PUBLIC — used throughout (Quartz Display Services + AppKit)
+- Only a size confirmed with **Keep** is saved (`privateDefaultWidth/Height`),
+  and only that size is auto-applied at launch, with no countdown. With no saved
+  default nothing is applied automatically.
+- The launch-time mode is stored for Restore Defaults.
+- The packaged app uses the `com.simplehidpiscaler.app` defaults domain and
+  migrates settings from the bare binary's `SimpleHiDPIScaler` domain once.
+- Open at login uses `SMAppService.mainApp` and needs the `.app` bundle.
 
-| API | Framework | Use |
-|---|---|---|
-| `CGGetActiveDisplayList` | CoreGraphics | enumerate `CGDirectDisplayID`s; also the online-wait poll |
-| `CGMainDisplayID`, `CGDisplayIsActive` | CoreGraphics | main vs external |
-| `CGDisplayVendorNumber` / `ModelNumber` / `SerialNumber` | CoreGraphics | Dell 0x10AC heuristic + fallback |
-| `CGDisplayPixelsWide` / `High` | CoreGraphics | native pixel size |
-| `NSScreen.screens` + `localizedName` | AppKit | human name (fragile under mirroring; see §1) |
-| `CGDisplayCopyAllDisplayModes(id, nil)` | CoreGraphics | list modes macOS exposes |
-| `CGDisplayMode` `width/height/pixelWidth/pixelHeight` | CoreGraphics | logical vs backing size → `isHiDPI = pixels > logical` |
-| `CGDisplayMode` `refreshRate` | CoreGraphics | "120 Hz" row |
-| `CGDisplayMode` `ioDisplayModeID` | CoreGraphics | re-identify a mode at apply time |
-| `CGDisplayMode` `isUsableForDesktopGUI()` | CoreGraphics | filter out unusable modes |
-| `CGDisplayCopyDisplayMode` | CoreGraphics | current mode (save-before-apply) |
-| `CGDisplaySetDisplayMode(id, mode, nil)` | CoreGraphics | apply a VERIFIED existing mode |
-| `CGBeginDisplayConfiguration` / `CGConfigureDisplayMirrorOfDisplay` / `CGCompleteDisplayConfiguration` / `CGCancelDisplayConfiguration` | CoreGraphics | mirror physical→virtual (public fn, private pipeline); 0 unmirrors |
-| `NSWorkspace.open(x-apple.systempreferences:…Displays…)` | AppKit | "Open Display Settings" |
-| `MenuBarExtra`, `UserDefaults`, `OSLog` | SwiftUI/Foundation | UI, reversible state, local logs |
+## Safety
 
-`CGDisplaySetDisplayMode` safety property (Apple docs): *"The selected display
-mode persists for the life of the calling program. When the program terminates,
-the display mode automatically reverts."* That holds **only** for
-`CGDisplaySetDisplayMode`. The private path changes the panel through a
-**mirror configuration**, which process exit does not revert by itself (observed:
-the panel was left at 2560×1080 after a teardown). The private path therefore
-restores explicitly: `disable()` captures the panel mode before mirroring and
-re-applies it after unmirror + destroy. A killed process loses its virtual, and
-the panel falls back to standalone (observed), but only `disable()` guarantees
-the previous mode.
+- Every manual change is followed by a 30-second Keep window; without Keep the
+  virtual display is torn down and the panel restored.
+- The picker lists physical panels only; virtual displays are never targets.
+- Quitting does not restore a mirrored panel by itself. Use Disable for this
+  display or Restore Defaults.
 
-### 2b. PRIVATE — approved opt-in prototype (implemented, gated)
+## Test plan
 
-| API | Status | What it does |
-|---|---|---|
-| `CGVirtualDisplayDescriptor` / `CGVirtualDisplay` / `CGVirtualDisplaySettings` / `CGVirtualDisplayMode` | Private Obj-C classes since 10.14, resolved at runtime via `NSClassFromString` | virtual display with `hiDPI=1`; WindowServer synthesizes 2× variants |
-| `CGConfigureDisplayMirrorOfDisplay` | Public fn used in the private pipeline | physical mirrors virtual; DCP downsamples 2× → panel |
-| `/Library/Displays/.../Overrides` `scale-resolutions` plists | Intel-era, ignored on Apple Silicon DCP | dead end on M-series |
-| DriverKit display extension | Public but Apple-entitlement-gated | the only blessed route; needs Apple approval |
-
-Lifecycle (`PrivateBridge` + `PrivateHiDPIGateway`): availability probe (no
-side effects) → `enable()` creates the virtual (unique serial per creation,
-dedicated dispatch queue, 120+60 Hz variants per logical size, 6880×2880 max)
-→ panel raised to its fastest native refresh (mirroring a 120 Hz panel only
-stays at 120 Hz if the panel is already at 120 Hz — verified live) →
-wait-for-online poll (≤2 s, off-main) → mirror → 30-s confirm or teardown.
-The virtual is created with only the requested "looks like" size (its mode list
-cannot be switched while mirrored), so a size change = `disable()` + `enable()`.
-The descriptor is retained beside the display and a termination handler prunes
-the gateway's bookkeeping when WindowServer ends a virtual.
-`disable()` unmirrors, waits for the mirror set to clear, destroys, then
-restores the saved panel mode. Errors are granular: `-10` begin,
-`-11`/`-12` configure, `-13` commit, `-20` never-online, `-30` already-creating,
-`-5` self-mirror. Swift reaches all of it only through the gateway, which
-returns `.optInRequired` unless `privatePrototypeEnabled` is true.
-
-### 2c. Verdict (stated BEFORE any private-API work, as required)
-
-> **The requested behaviour — synthesizing new HiDPI backing stores
-> (≈3008×1264 HiDPI, ≈2560×1080 HiDPI) for a sub-4K 3440×1440 panel on Apple
-> Silicon — cannot be achieved with public APIs.** Public APIs can only
-> enumerate and select modes macOS/the GPU already exposes. This PoC therefore
-> implements the honest subset (enumerate truthfully, select safely, say "not
-> exposed" otherwise) plus the explicitly approved private prototype above.
-
-## 3. Permission analysis
-
-| Permission | Requested? | Why / why not |
-|---|---|---|
-| Network (incoming/outgoing) | NO | No network code exists. Verify: `grep -ri URLSession\|Network\|socket Sources/` returns only the System Settings URL opener. |
-| Screen Recording (`CGPreflightScreenCaptureAccess`, ScreenCaptureKit) | NO | We never capture pixels; mode metadata needs no capture entitlement. |
-| Accessibility / Input Monitoring | NO | No event taps, no key monitoring. |
-| Camera / Microphone / Contacts / Calendars / Reminders | NO | Irrelevant to display modes. |
-| Documents / Desktop / Downloads folder access | NO | State lives in `UserDefaults`; logs in `~/Library/Logs`. |
-| Keychain | NO | Nothing secret is stored. |
-| Location / Bluetooth / Automation | NO | Not used. |
-| Display mode switching / mirroring | No entitlement exists | `CGDisplaySetDisplayMode` and `CGConfigureDisplayMirrorOfDisplay` among exposed displays require no special permission; zero-entitlement + sandbox-compatible remains correct. |
-
-The `.entitlements` file is intentionally empty so any future request is a
-loud diff. See `PRIVACY.md` and `SECURITY.md`.
-
-## 4. Risks / limitations
-
-1. **Sub-4K ultrawides show no HiDPI rows publicly.** Expected on Apple
-   Silicon; the UI explains it instead of pretending.
-2. **Mode list varies by cable/GPU/macOS version.** Fuzzy matching + "not
-   exposed" states, never hard-coded IDs. Refresh can be 60 or 120 Hz on the
-   same panel across sessions.
-3. **`CGDisplaySetDisplayMode` is per-process-lifetime.** Quit = revert for
-   public changes only; the private mirror path is restored by `disable()`.
-4. **Persistence:** the size confirmed with Keep is saved
-   (`privateDefaultWidth/Height`) and re-applied at launch, including at login,
-   without a countdown. Public-tier modes are not persisted.
-5. **Private prototype costs** (approved, opt-in): breaks on OS updates, App
-   Store rejection, notarization scrutiny, typically mixed 60/120 Hz behavior
-   while mirrored (120 Hz is kept when the panel is at 120 Hz before mirroring),
-   a 30-s Keep confirm on every manual change; only a size the user already
-   confirmed is auto-applied at launch.
-6. **Fixed live bugs (kept here so they stay fixed):** plain low-res fallback
-   offered as scaling (now HiDPI-required); virtual selectable as a target and
-   de-HiDPI'd by public Apply (now picker + apply + enable all refuse
-   virtuals); main-thread online-wait deadlock (creation now off-main, bridge
-   uses a dedicated queue); serial reuse colliding with teardown-limbo
-   virtuals (now unique per creation); mirror-before-online commit failures
-   (now wait-for-online + single-flight).
-7. **Open issues:** the private rows assume virtual modes expose backing =
-   2× logical — unverified against `CGDisplayCopyAllDisplayModes(virtual)`.
-   Next step is a read-only `DumpModes` comparison (planned, not yet built).
-   Stale virtuals from killed processes can linger and confuse selection;
-   `SelfTest` writes fake `display=42` lines into the real local log (test
-   hygiene debt); `launchDefault*` can go stale if first launch happens while
-   scaled (delete the keys while at native and relaunch to recapture).
-8. **Multi-display.** Selection is per-`CGDirectDisplayID`; IDs are not stable
-   across replugs, so `ConfigurationStore` records geometry as well as ID.
-
-## 5. Minimal proof of concept (what ships in this repo)
-
-- Menu-bar app (`MenuBarExtra`, `LSUIElement`, no dock icon).
-- Startup: enumerate displays, flag Dell exact/likely, show name / ID /
-  native pixels / current logical+backing / refresh / HiDPI yes-no.
-- Physical-only display picker with IDs (never assumes Dell-is-only-external).
-- Public scaling rows mapped to exposed HiDPI modes; unavailable rows disabled
-  with an honest explanation + pointer to §2.
-- Apply → save previous → verify-exists → `CGDisplaySetDisplayMode` →
-  10-second "Keep?" countdown → auto-restore on timeout.
-- Private section: opt-in toggle → Enable for this display (background
-  creation, wait-for-online, mirror) → 10-s confirm or teardown → private 2x
-  rows → Apply onto the virtual → Keep. Kill-switch unmirrors + destroys.
-- "Restore Defaults" (launch-time mode + private teardown), "Open Display
-  Settings", "Clear logs", "Refresh displays".
-- Local-only logging (display ID, previous/selected, result code; private
-  virtual↔physical IDs and mirror codes).
-- Unit tests + `SelfTest` (no hardware): mode selection, identification,
-  rollback, private gating.
-
-Build & test (Command Line Tools are enough):
-
-```sh
-swift build
-swift run SelfTest   # XCTest.framework not in CLT; mirrors swift test
-```
-
-Xcode packaging (signed/notarized bundle) is documented in `README.md`.
-
-## 6. Test plan
-
-| Area | Cases (see `Tests/` + `Sources/SelfTest/`) |
-|---|---|
-| Mode selection | maps 3 rows to exposed modes; prefers HiDPI over plain; prefers 120 Hz; tolerates ±3% rounding; nil when nothing close; plain low-res NEVER matches scaling rows (regression); `isHiDPI` from pixels-vs-logical |
-| Identification | Dell vendor+res; name+res when hub masks vendor; rejects wrong res; rejects LG as Dell but flags external-ultrawide; multi-display picks only Dell; `isDellUWQHD` fallback for generic mirrored names; main never external |
-| Rollback | fires exactly once on 10th tick; `confirm()` cancels; restores launch default via fake; phantom mode never reaches hardware; store round-trips and clears |
-| Private gating (headless) | opt-in off → `.optInRequired` without touching WindowServer; gating matrix (off→refuse, on+absent→unavailable, on+present→proceed); never creates real virtuals in tests |
-| Manual (on hardware) | DP + HDMI: enumerate; public Native apply/timeout/confirm/quit-revert/replug/Restore/Clear-logs with no permission prompts; private: opt-in → Enable → Keep → Larger/Much Larger → Keep → verify looks-like vs backing in System Settings → Disable kill-switch → verify standalone; confirm picker never offers SimpleHiDPI targets |
-
-No test requires network. Only the manual private path touches real displays.
+- `swift run SelfTest` / `swift test`: mode matching, display identification,
+  rollback timing, with fakes.
+- `LiveProbe test <id> <w> <h>` on hardware: enable, check the mirrored mode
+  (`looks-like@backing`, refresh), tear down, check the panel returned to its
+  previous mode.
+- Manual: each size row, Keep and timeout, Restore Defaults, relaunch with a
+  saved default, login item.
