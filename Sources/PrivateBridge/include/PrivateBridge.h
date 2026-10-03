@@ -36,6 +36,11 @@ int PrivateVirtualDisplayCreate(
     int count,
     unsigned int *outDisplayID);
 
+/// Called (on an arbitrary queue) when WindowServer ends a virtual display we
+/// created, including our own destroy. Lets the owner prune its bookkeeping.
+typedef void (*PrivateVirtualDisplayTerminationCallback)(unsigned int displayID);
+void PrivateVirtualDisplaySetTerminationCallback(PrivateVirtualDisplayTerminationCallback cb);
+
 /// Release a previously created virtual display. Safe to call with unknown IDs.
 void PrivateVirtualDisplayDestroy(unsigned int displayID);
 

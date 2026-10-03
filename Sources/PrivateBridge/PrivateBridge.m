@@ -1,8 +1,22 @@
 #import "PrivateBridge.h"
 #import "CGVirtualDisplayPrivate.h"
 
-static NSMutableDictionary<NSNumber *, CGVirtualDisplay *> *gDisplays = nil;
+// The descriptor is kept alive next to its display: releasing it when Create
+// returned was one of the causes of leaked/orphaned virtuals.
+@interface VirtualHolder : NSObject
+@property(strong) CGVirtualDisplay *display;
+@property(strong) CGVirtualDisplayDescriptor *descriptor;
+@end
+@implementation VirtualHolder
+@end
+
+static NSMutableDictionary<NSNumber *, VirtualHolder *> *gDisplays = nil;
 static NSObject *gLock = nil;
+static PrivateVirtualDisplayTerminationCallback gTerminationCallback = NULL;
+
+void PrivateVirtualDisplaySetTerminationCallback(PrivateVirtualDisplayTerminationCallback cb) {
+    gTerminationCallback = cb;
+}
 
 __attribute__((constructor)) static void PrivateBridgeInit(void) {
     gDisplays = [NSMutableDictionary new];
@@ -59,6 +73,15 @@ int PrivateVirtualDisplayCreate(
         descriptor.maxPixelsWide = maxPixelsWide;
         descriptor.maxPixelsHigh = maxPixelsHigh;
         descriptor.sizeInMillimeters = CGSizeMake(mmWide, mmHigh);
+        descriptor.terminationHandler = ^(id sender, CGVirtualDisplay *ended) {
+            (void)sender;
+            unsigned int endedID = ended ? (unsigned int)ended.displayID : 0;
+            if (endedID != 0) {
+                @synchronized (gLock) { [gDisplays removeObjectForKey:@(endedID)]; }
+                PrivateVirtualDisplayTerminationCallback cb = gTerminationCallback;
+                if (cb) cb(endedID);
+            }
+        };
         // Dedicated queue: the main queue can be blocked by the caller's
         // online-wait poll, which previously deadlocked activation.
         dispatch_queue_t q = dispatch_queue_create("com.simplehidpiscaler.virtual", DISPATCH_QUEUE_SERIAL);
@@ -89,11 +112,12 @@ int PrivateVirtualDisplayCreate(
         CGDirectDisplayID did = [display displayID];
         if (did == 0) return -3;
 
+        VirtualHolder *holder = [VirtualHolder new];
+        holder.display = display;
+        holder.descriptor = descriptor;
         @synchronized (gLock) {
-            gDisplays[@(did)] = display;
+            gDisplays[@(did)] = holder;
         }
-        // Break any potential retain cycle warnings: keep descriptor alive via display.
-        (void)descriptor;
         *outDisplayID = (unsigned int)did;
         return 0;
     }

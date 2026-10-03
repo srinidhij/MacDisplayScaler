@@ -34,9 +34,14 @@ this app, do not grant it — file a bug instead.
 - **Clear logs**: the "Clear logs" button in the menu-bar UI deletes
   `~/Library/Logs/SimpleHiDPIScaler.log`.
 - **Forget saved modes**: delete the app's `UserDefaults` domain
-  (`defaults delete <bundle-id>`) or use "Restore Defaults" then quit.
-- **Full revert**: quit the app — Apple automatically reverts
-  `CGDisplaySetDisplayMode` changes made by a terminated process.
+  (`defaults delete com.simplehidpiscaler.app` for the packaged app, or
+  `defaults delete SimpleHiDPIScaler` for a bare `swift run` binary), or press
+  "Clear" next to the saved default size.
+- **Full revert**: use "Disable for this display" / "Restore Defaults" in the
+  menu. Quitting reverts only public `CGDisplaySetDisplayMode` changes; the
+  private mirror path is undone by the app's own teardown.
+- **Open at login** is a standard macOS login item you can remove in System
+  Settings → General → Login Items.
 
 ## Contact
 

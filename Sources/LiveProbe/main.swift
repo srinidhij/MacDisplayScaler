@@ -4,7 +4,7 @@ import SimpleHiDPIScalerCore
 
 // Live experiment driver. Usage:
 //   LiveProbe dump
-//   LiveProbe restore <displayID>            re-apply native 3440x1440 1x
+//   LiveProbe restore <displayID> [max]      re-apply native 3440x1440 1x (lowest refresh, or highest with `max`)
 //   LiveProbe test <displayID> <w> <h>       enable virtual, switch to w x h 2x, hold, tear down
 
 func allModes(_ id: CGDirectDisplayID) -> [CGDisplayMode] {
@@ -52,7 +52,7 @@ case "dump":
 case "restore":
     let id = CGDirectDisplayID(args[2])!
     let target = allModes(id).filter { $0.width == 3440 && $0.height == 1440 && $0.pixelWidth == 3440 }
-        .sorted { $0.refreshRate < $1.refreshRate }.first
+        .sorted { args.count > 3 ? $0.refreshRate > $1.refreshRate : $0.refreshRate < $1.refreshRate }.first
     guard let t = target else { print("no native mode"); exit(1) }
     print("restoring", describe(t), configureMode(id, t))
 case "test":

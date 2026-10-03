@@ -78,9 +78,10 @@ SimpleHiDPIScaler (menu bar)
   `SimpleHiDPI *` displays are status, never targets — applying a public 1x
   mode to a virtual destroys its HiDPI-ness (observed live; now refused).
 - **Apply** saves the current mode, verifies the target still exists, switches,
-  and starts a **10-second countdown**. Confirm to keep; otherwise the previous
-  mode is restored automatically. Quitting the app also reverts public changes
-  (Apple behaviour of `CGDisplaySetDisplayMode`).
+  and starts a **30-second countdown**. Confirm to keep; otherwise the previous
+  mode is restored automatically. Quitting the app reverts public
+  `CGDisplaySetDisplayMode` changes only; it does **not** undo the private
+  mirror path — use the kill-switch / Restore Defaults for that.
 - **Restore Defaults** re-applies the launch-time mode **and** tears down any
   private virtual for that display (kill-switch).
 - If no HiDPI rows exist for your cable/GPU/macOS combination, that is the GPU
@@ -92,21 +93,29 @@ Public APIs cannot synthesize HiDPI for this panel, so the approved fallback is:
 
 - `Sources/PrivateBridge/` (ObjC, private classes resolved at runtime via
   `NSClassFromString` — no link-time dependency): creates a `hiDPI=1` virtual
-  display (3440×1440 / 3008×1264 / 2560×1080, each at 120 Hz and 60 Hz, 2x
-  backing, 6880×2880 max) and mirrors the physical Dell onto it with the
+  display at the chosen "looks like" size (3440×1440 / 3008×1264 / 2752×1152 /
+  2560×1080, each at 120 Hz and 60 Hz, 2x backing) and mirrors the physical Dell onto it with the
   **public** `CGConfigureDisplayMirrorOfDisplay`. The DCP downsamples 2x to
   the panel.
 - `PrivateHiDPIGateway` (Swift): `privatePrototypeEnabled` defaults OFF;
   `enable()` / `disable()` lifecycle with kill-switch; creation runs off-main
   with wait-for-online; unique serial per creation; single-flight guards.
 - Menu bar → "Private HiDPI prototype": Enable opt-in → Enable HiDPI for this
-  display → **Keep within 10 s** or it auto-tears-down. Then pick Larger / Much
-  Larger (private 2x rows) → Apply → Keep. `Restore Defaults` also tears down.
+  display → **Keep within 30 s** or it auto-tears-down. Then click Larger /
+  Larger+ / Much Larger — a click applies immediately (the display is re-created
+  at that size, ~1–2 s flicker) → Keep. **Keep also saves that size as the
+  default**, re-applied at every launch without a countdown ("Clear" removes it).
+  `Restore Defaults` also tears down.
+- **Open at login**: build the app bundle with `scripts/build-app.sh --install`
+  (installs `~/Applications/SimpleHiDPIScaler.app`, menu-bar only, ad-hoc
+  signed) and flip the "Open at login" toggle; approve it in System Settings →
+  General → Login Items if macOS asks. Bare `swift run` binaries can't do this.
 - Prerequisites: select the **physical** Dell (never a SimpleHiDPI entry) and
   set it to Native 3440×1440 first; one action at a time (no rapid retries).
 
-Limits (all observed, not theoretical): needs explicit Keep every enable;
-virtual refresh may settle at 60 or 120 Hz; breaks on OS updates; no App Store;
+Limits (all observed, not theoretical): needs explicit Keep for each manual
+change; the pair runs at 120 Hz only if the panel is at 120 Hz before mirroring
+(the app raises it automatically); breaks on OS updates; no App Store;
 stale virtuals from killed processes can linger until torn down; the 2x-geometry
 assumption for virtual modes is still being verified (see `ARCHITECTURE.md`
 §4). Keep it off unless you need it; public rows remain the default.

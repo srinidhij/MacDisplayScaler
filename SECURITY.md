@@ -39,21 +39,25 @@ they are unnecessary for display-mode bugs.
    user enables the `privatePrototypeEnabled` opt-in (default OFF for fresh
    installs). Protections: unique serial per creation, wait-for-online before
    mirroring, single-flight creation, virtual IDs refused as apply/enable
-   targets, kill-switch (`disable()` = unmirror + destroy), mandatory 10-s
-   rollback on enable and virtual mode switches. Any PR touching this path
+   targets, kill-switch (`disable()` = unmirror + destroy), mandatory 30-s
+   Keep/rollback on every manual enable and size switch (a size the user already
+   confirmed with Keep is re-applied at launch without a countdown). Any PR touching this path
    must update this file, `ARCHITECTURE.md` §2b, `README.md`, and `PRIVACY.md`.
    App Store submission is out of scope while this path exists.
 7. **Reversible by design.** Every apply path snapshots the previous mode;
-   the 10-second rollback restores it (public) or tears down the virtual
-   (private); quitting reverts public changes per Apple semantics;
+   the keep-timeout rollback restores it (public) or tears down the virtual
+   and re-applies the panel's pre-mirror mode (private). Quitting reverts only
+   `CGDisplaySetDisplayMode` changes (Apple semantics); the private mirror path
+   does **not** revert on quit by itself, so use the kill-switch or Restore
+   Defaults rather than relying on exit;
    "Restore Defaults" returns to the launch-time mode and kills any private
    virtual for that display.
 
 ## Known limitations (not vulnerabilities)
 
 - `CGDisplaySetDisplayMode` is process-lifetime scoped: public modes do not
-  survive app quit/reboot. That is Apple's documented behaviour and our
-  fail-safe.
+  survive app quit/reboot. That is Apple's documented behaviour. It does not
+  cover the private mirror path (see §7).
 - Sub-4K panels may expose zero HiDPI modes publicly. The app reports this;
   it does not escalate privileges or patch the system to "fix" it.
 - Private virtuals can outlive the process that created them in teardown

@@ -52,6 +52,40 @@ public enum PrivateHiDPIGateway: Sendable {
     /// Panel mode captured before mirroring, re-applied on teardown. Process
     /// exit does NOT revert a mirror configuration, so this is the only restore.
     private static var _savedModes: [UInt32: CGDisplayMode] = [:]
+    private static var _sizes: [UInt32: (width: Int, height: Int)] = [:] // physical -> "looks like"
+    private static let installTermination: Void = {
+        PrivateVirtualDisplaySetTerminationCallback { endedID in
+            PrivateHiDPIGateway.virtualEnded(endedID)
+        }
+    }()
+
+    /// WindowServer ended a virtual (our own destroy, or it died). Prune state.
+    static func virtualEnded(_ virtualID: UInt32) {
+        lock.lock(); defer { lock.unlock() }
+        for (physical, v) in _active where v == virtualID {
+            _active.removeValue(forKey: physical)
+            _sizes.removeValue(forKey: physical)
+            _savedModes.removeValue(forKey: physical)
+        }
+    }
+
+    /// Looks-like size of the active private display for a physical panel.
+    public static func activeSize(forPhysical physical: UInt32) -> (width: Int, height: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        return _sizes[physical]
+    }
+
+    /// Highest-refresh native (1x) mode with the panel's current pixel size.
+    /// Mirroring a 120 Hz-capable panel only keeps 120 Hz when the panel is
+    /// already at 120 Hz beforehand (verified live), else the pair sticks at 60.
+    static func fastestNativeMode(for id: CGDirectDisplayID) -> CGDisplayMode? {
+        guard let cur = CGDisplayCopyDisplayMode(id) else { return nil }
+        let all = (CGDisplayCopyAllDisplayModes(id, nil) as? [CGDisplayMode]) ?? []
+        return all
+            .filter { $0.pixelWidth == cur.pixelWidth && $0.pixelHeight == cur.pixelHeight
+                && $0.width == $0.pixelWidth && $0.isUsableForDesktopGUI() }
+            .max { $0.refreshRate < $1.refreshRate }
+    }
 
     // MARK: - Opt-in (default OFF)
 
@@ -103,6 +137,7 @@ public enum PrivateHiDPIGateway: Sendable {
     ) -> Result<PrivateHiDPIResult, PrivateHiDPIError> {
         guard optInEnabled else { return .failure(.optInRequired) }
         guard isAvailable else { return .failure(.unavailable) }
+        _ = installTermination
         lock.lock()
         if _creating {
             lock.unlock()
@@ -161,7 +196,12 @@ public enum PrivateHiDPIGateway: Sendable {
             PrivateVirtualDisplayDestroy(outID)
             return .failure(.creationFailed(-20))
         }
-        let savedMode = CGDisplayCopyDisplayMode(CGDirectDisplayID(physicalDisplayID))
+        let did = CGDirectDisplayID(physicalDisplayID)
+        let savedMode = CGDisplayCopyDisplayMode(did)
+        if let fast = fastestNativeMode(for: did), let cur = savedMode, fast.refreshRate > cur.refreshRate {
+            _ = CGDisplaySetDisplayMode(did, fast, nil)
+            Thread.sleep(forTimeInterval: 1.0)
+        }
         let mirrorRC = Int32(PrivateMirrorPhysicalOntoVirtual(physicalDisplayID, outID))
         guard mirrorRC == 0 else {
             PrivateVirtualDisplayDestroy(outID)
@@ -169,6 +209,7 @@ public enum PrivateHiDPIGateway: Sendable {
         }
         lock.lock()
         _active[physicalDisplayID] = outID
+        if let first = logicalModes.first { _sizes[physicalDisplayID] = (first.width, first.height) }
         if let savedMode { _savedModes[physicalDisplayID] = savedMode }
         lock.unlock()
         return .success(PrivateHiDPIResult(virtualDisplayID: outID, physicalDisplayID: physicalDisplayID))
@@ -181,6 +222,7 @@ public enum PrivateHiDPIGateway: Sendable {
     public static func disable(physicalDisplayID: UInt32) {
         let (virtual, saved): (UInt32?, CGDisplayMode?) = {
             lock.lock(); defer { lock.unlock() }
+            _sizes.removeValue(forKey: physicalDisplayID)
             return (_active.removeValue(forKey: physicalDisplayID),
                     _savedModes.removeValue(forKey: physicalDisplayID))
         }()

@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SimpleHiDPIScalerCore
 import SwiftUI
 
@@ -35,6 +36,9 @@ final class MenuBarViewModel: ObservableObject {
     @Published var privateActiveVirtualID: UInt32?
     @Published var privateModeActive = false
     @Published var privateBusy = false
+    @Published var savedDefaultSize: (width: Int, height: Int)?
+    @Published var launchAtLogin = false
+    @Published var launchAtLoginNote = ""
 
     private let manager: DisplayManaging
     private let scaling: ScalingManaging
@@ -43,6 +47,7 @@ final class MenuBarViewModel: ObservableObject {
     private var timer: Timer?
     private var pendingPrevious: DisplayModeInfo?
     private var didAutoEnableThisLaunch = false
+    private let defaultStore = PrivateDefaultStore()
 
     init(
         manager: DisplayManaging = DisplayManager(),
@@ -54,7 +59,16 @@ final class MenuBarViewModel: ObservableObject {
         self.scaling = scaling
         self.store = store
         self.rollback = rollback
+        PrivateDefaultStore.migrateLegacyDomain()
+        privateOptIn = PrivateHiDPIGateway.optInEnabled
+        savedDefaultSize = defaultStore.size
+        refreshLaunchAtLogin()
         refresh()
+        // At login the displays may not be up yet; retry once.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if !self.didAutoEnableThisLaunch { self.refresh() }
+        }
     }
 
     var selectedDisplay: DisplayInfo? {
@@ -120,7 +134,11 @@ final class MenuBarViewModel: ObservableObject {
                                                            pixelWidth: size.width * 2, pixelHeight: size.height * 2,
                                                            refreshRate: 60))
             }
-            if selectedLogicalWidth == nil { selectedLogicalWidth = 3440 }
+            if let active = PrivateHiDPIGateway.activeSize(forPhysical: id) {
+                selectedLogicalWidth = active.width
+            } else if selectedLogicalWidth == nil {
+                selectedLogicalWidth = 3440
+            }
             return
         }
         privateModeActive = false
@@ -143,6 +161,14 @@ final class MenuBarViewModel: ObservableObject {
     /// public path it only selects, and Apply commits.
     func choose(_ option: ScalingOption) {
         AppLogger.shared.info("row click \(option.logicalWidth)x\(option.logicalHeight) private=\(privateModeActive) busy=\(privateBusy)")
+        if privateModeActive, let id = selectedDisplayID,
+           let active = PrivateHiDPIGateway.activeSize(forPhysical: id),
+           active.width == option.logicalWidth, active.height == option.logicalHeight
+        {
+            selectedLogicalWidth = option.logicalWidth
+            statusMessage = "Already at \(option.logicalWidth)×\(option.logicalHeight)."
+            return
+        }
         selectedLogicalWidth = option.logicalWidth
         if privateModeActive, !privateBusy {
             applySelected()
@@ -207,7 +233,13 @@ final class MenuBarViewModel: ObservableObject {
     func confirmKeep() {
         rollback.confirm()
         stopCountdown()
-        statusMessage = "Kept. (Mode also reverts automatically if the app quits — Apple behaviour.)"
+        if let size = selectedDisplayID.flatMap({ PrivateHiDPIGateway.activeSize(forPhysical: $0) }) {
+            defaultStore.size = size
+            savedDefaultSize = size
+            statusMessage = "Kept and saved as default (\(size.width)×\(size.height)); it will be applied at every launch."
+        } else {
+            statusMessage = "Kept."
+        }
     }
 
     func openDisplaySettings() {
@@ -248,7 +280,9 @@ final class MenuBarViewModel: ObservableObject {
         refresh()
     }
 
-    func enablePrivatePrototype() {
+    /// - Parameter savedDefault: when non-nil this is an auto-apply of the size the
+    ///   user already confirmed, so it runs without the Keep countdown.
+    func enablePrivatePrototype(savedDefault: (width: Int, height: Int)? = nil) {
         guard let id = selectedDisplayID else { return }
         guard PrivateHiDPIGateway.optInEnabled else {
             statusMessage = "Enable the opt-in toggle first."
@@ -277,7 +311,9 @@ final class MenuBarViewModel: ObservableObject {
         statusMessage = "Creating private virtual display…"
         // Creation polls for the new display (blocking sleeps), so it runs
         // off-main; UI updates resume on MainActor when it completes.
-        let size = Self.privateSizes.first(where: { $0.width == selectedLogicalWidth }) ?? Self.privateSizes[1]
+        let size: (width: Int, height: Int) = savedDefault
+            ?? Self.privateSizes.first(where: { $0.width == selectedLogicalWidth }).map { ($0.width, $0.height) }
+            ?? (Self.privateSizes[1].width, Self.privateSizes[1].height)
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 PrivateHiDPIGateway.enable(physicalDisplayID: id, logicalWidth: size.width, logicalHeight: size.height)
@@ -286,9 +322,13 @@ final class MenuBarViewModel: ObservableObject {
             switch result {
             case .success(let r):
                 AppLogger.shared.info("display=\(id) private virtual=\(r.virtualDisplayID) created+mirrored")
-                self.statusMessage = "Private HiDPI active (virtual \(r.virtualDisplayID)). Confirm within \(Self.keepTimeoutSeconds) s."
                 self.refresh()
-                self.startPrivateCountdown(physicalID: id, virtualID: r.virtualDisplayID, previous: nil, isEnableRollback: true)
+                if savedDefault != nil {
+                    self.statusMessage = "Applied saved default \(size.width)×\(size.height)."
+                } else {
+                    self.statusMessage = "Private HiDPI active (virtual \(r.virtualDisplayID)). Confirm within \(Self.keepTimeoutSeconds) s."
+                    self.startPrivateCountdown(physicalID: id, virtualID: r.virtualDisplayID, previous: nil, isEnableRollback: true)
+                }
             case .failure(let e):
                 if case .creationFailed(let code) = e, code == -30 {
                     self.statusMessage = "Creation already in progress — wait a few seconds."
@@ -299,6 +339,50 @@ final class MenuBarViewModel: ObservableObject {
                 self.refreshPrivateStatus()
             }
         }
+    }
+
+    func saveCurrentAsDefault() {
+        guard let id = selectedDisplayID, let size = PrivateHiDPIGateway.activeSize(forPhysical: id) else { return }
+        defaultStore.size = size
+        savedDefaultSize = size
+        statusMessage = "Saved \(size.width)×\(size.height) as the default for every launch."
+    }
+
+    func clearSavedDefault() {
+        defaultStore.size = nil
+        savedDefaultSize = nil
+        statusMessage = "Saved default cleared; nothing is applied automatically at launch."
+    }
+
+    // MARK: - Launch at login (needs the .app bundle; no-op for the bare binary)
+
+    func refreshLaunchAtLogin() {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            launchAtLogin = false
+            launchAtLoginNote = "Run the packaged .app (scripts/build-app.sh) to enable."
+            return
+        }
+        switch SMAppService.mainApp.status {
+        case .enabled: launchAtLogin = true; launchAtLoginNote = ""
+        case .requiresApproval:
+            launchAtLogin = true
+            launchAtLoginNote = "Approve in System Settings → General → Login Items."
+        default: launchAtLogin = false; launchAtLoginNote = ""
+        }
+    }
+
+    func toggleLaunchAtLogin() {
+        guard Bundle.main.bundleURL.pathExtension == "app" else { refreshLaunchAtLogin(); return }
+        do {
+            if SMAppService.mainApp.status == .notRegistered || SMAppService.mainApp.status == .notFound {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            statusMessage = "Login item change failed: \(error.localizedDescription)"
+        }
+        refreshLaunchAtLogin()
     }
 
     /// Seconds the user has to click Keep before the change rolls back.
@@ -349,11 +433,11 @@ final class MenuBarViewModel: ObservableObject {
         refresh()
     }
 
-    /// Auto-enable once per launch when the user has opted in (persisted).
-    /// Fresh installs still default to OFF. Always arms the keep-timeout rollback,
-    /// so an unattended launch safely tears down instead of sticking.
+    /// Auto-apply once per launch (so also at login) the size the user last
+    /// confirmed with Keep. Needs the opt-in and a saved default; with no saved
+    /// default nothing happens, so an unconfirmed size is never auto-applied.
     private func maybeAutoEnablePrivate() {
-        guard !didAutoEnableThisLaunch else { return }
+        guard !didAutoEnableThisLaunch, let saved = defaultStore.size else { return }
         guard PrivateHiDPIGateway.optInEnabled,
               PrivateHiDPIGateway.isAvailable,
               let id = selectedDisplayID,
@@ -362,7 +446,7 @@ final class MenuBarViewModel: ObservableObject {
               countdown == 0 else { return }
         if PrivateHiDPIGateway.activeMap.values.contains(id) { return } // never target a virtual display
         didAutoEnableThisLaunch = true
-        enablePrivatePrototype()
+        enablePrivatePrototype(savedDefault: saved)
     }
 
     private func startPrivateCountdown(physicalID: CGDirectDisplayID, virtualID: CGDirectDisplayID, previous: DisplayModeInfo?, isEnableRollback: Bool = false) {
@@ -523,6 +607,30 @@ struct MenuBarView: View {
                 }
 
                 Divider()
+                if let d = viewModel.savedDefaultSize {
+                    HStack {
+                        Text("Default at launch: \(d.width)×\(d.height) ✓")
+                            .font(.caption).foregroundStyle(.green)
+                        Spacer()
+                        Button("Clear") { viewModel.clearSavedDefault() }.font(.caption)
+                    }
+                } else {
+                    Text("No default saved — press Keep after choosing a size to save it.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if viewModel.privateModeActive, let id = viewModel.selectedDisplayID,
+                   let active = PrivateHiDPIGateway.activeSize(forPhysical: id),
+                   viewModel.savedDefaultSize?.width != active.width || viewModel.savedDefaultSize?.height != active.height
+                {
+                    Button("Save \(active.width)×\(active.height) as default") { viewModel.saveCurrentAsDefault() }
+                }
+                Toggle("Open at login", isOn: Binding(
+                    get: { viewModel.launchAtLogin },
+                    set: { _ in viewModel.toggleLaunchAtLogin() }
+                ))
+                if !viewModel.launchAtLoginNote.isEmpty {
+                    Text(viewModel.launchAtLoginNote).font(.caption).foregroundStyle(.secondary)
+                }
                 Button("Restore Defaults") { viewModel.restoreDefaults() }
                 Button("Open Display Settings") { viewModel.openDisplaySettings() }
                 Button("Clear logs") { viewModel.clearLogs() }

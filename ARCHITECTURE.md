@@ -74,9 +74,14 @@ debugging it live.
 
 `CGDisplaySetDisplayMode` safety property (Apple docs): *"The selected display
 mode persists for the life of the calling program. When the program terminates,
-the display mode automatically reverts."* Quitting the app is a free fail-safe
-for public changes. (Private virtuals are torn down via the kill-switch;
-stale ones from killed processes can linger — see §4.)
+the display mode automatically reverts."* That holds **only** for
+`CGDisplaySetDisplayMode`. The private path changes the panel through a
+**mirror configuration**, which process exit does not revert by itself (observed:
+the panel was left at 2560×1080 after a teardown). The private path therefore
+restores explicitly: `disable()` captures the panel mode before mirroring and
+re-applies it after unmirror + destroy. A killed process loses its virtual, and
+the panel falls back to standalone (observed), but only `disable()` guarantees
+the previous mode.
 
 ### 2b. PRIVATE — approved opt-in prototype (implemented, gated)
 
@@ -90,8 +95,15 @@ stale ones from killed processes can linger — see §4.)
 Lifecycle (`PrivateBridge` + `PrivateHiDPIGateway`): availability probe (no
 side effects) → `enable()` creates the virtual (unique serial per creation,
 dedicated dispatch queue, 120+60 Hz variants per logical size, 6880×2880 max)
-→ wait-for-online poll (≤2 s, off-main) → mirror → 10-s confirm or teardown.
-`disable()` unmirrors then destroys. Errors are granular: `-10` begin,
+→ panel raised to its fastest native refresh (mirroring a 120 Hz panel only
+stays at 120 Hz if the panel is already at 120 Hz — verified live) →
+wait-for-online poll (≤2 s, off-main) → mirror → 30-s confirm or teardown.
+The virtual is created with only the requested "looks like" size (its mode list
+cannot be switched while mirrored), so a size change = `disable()` + `enable()`.
+The descriptor is retained beside the display and a termination handler prunes
+the gateway's bookkeeping when WindowServer ends a virtual.
+`disable()` unmirrors, waits for the mirror set to clear, destroys, then
+restores the saved panel mode. Errors are granular: `-10` begin,
 `-11`/`-12` configure, `-13` commit, `-20` never-online, `-30` already-creating,
 `-5` self-mirror. Swift reaches all of it only through the gateway, which
 returns `.optInRequired` unless `privatePrototypeEnabled` is true.
@@ -129,12 +141,15 @@ loud diff. See `PRIVACY.md` and `SECURITY.md`.
    exposed" states, never hard-coded IDs. Refresh can be 60 or 120 Hz on the
    same panel across sessions.
 3. **`CGDisplaySetDisplayMode` is per-process-lifetime.** Quit = revert for
-   public changes (fail-safe); bad for persistence — documented in UI.
-4. **No persistence of custom modes** beyond the running prototype session.
+   public changes only; the private mirror path is restored by `disable()`.
+4. **Persistence:** the size confirmed with Keep is saved
+   (`privateDefaultWidth/Height`) and re-applied at launch, including at login,
+   without a countdown. Public-tier modes are not persisted.
 5. **Private prototype costs** (approved, opt-in): breaks on OS updates, App
    Store rejection, notarization scrutiny, typically mixed 60/120 Hz behavior
-   while mirrored, mandatory 10-s confirm every enable (unattended launches
-   tear down by design).
+   while mirrored (120 Hz is kept when the panel is at 120 Hz before mirroring),
+   a 30-s Keep confirm on every manual change; only a size the user already
+   confirmed is auto-applied at launch.
 6. **Fixed live bugs (kept here so they stay fixed):** plain low-res fallback
    offered as scaling (now HiDPI-required); virtual selectable as a target and
    de-HiDPI'd by public Apply (now picker + apply + enable all refuse
