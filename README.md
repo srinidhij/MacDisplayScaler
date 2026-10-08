@@ -27,7 +27,8 @@ renders a 5504×2304 image that is downsampled to 3440×1440.
 | Larger+ | 2752×1152 | 5504×2304 |
 | Much Larger | 2560×1080 | 5120×2160 |
 
-The panel's refresh rate is kept (120 Hz when the panel is at 120 Hz).
+The panel runs at its native resolution and its fastest refresh rate (120 Hz
+on the U3425WE).
 
 ## Requirements
 
@@ -51,19 +52,27 @@ binary (no "Open at login").
 2. Turn on the opt-in toggle, then **Enable HiDPI for this display**.
 3. Click a size. It applies immediately (about 1–2 s of flicker).
 4. Press **Keep** within 30 seconds, or the change rolls back. Keep also saves
-   that size as the default, which is applied automatically at every launch
-   without a countdown. **Clear** removes the saved default.
+   that size as the default for that display, which is applied automatically at
+   every launch and whenever the display reconnects, without a countdown.
+   **Clear** removes the saved default.
 5. **Open at login** adds the app as a login item (approve it in System
    Settings → General → Login Items if macOS asks).
 
 **Restore Defaults** and **Disable for this display** unmirror, remove the
-virtual display, and put the panel back in its previous mode.
+virtual display, and put the panel back in its previous mode. Unplugging or
+switching off the display does the same automatically.
+
+System Settings → Displays lists both the virtual display ("SimpleHiDPI …") and
+the panel, set to "Mirror for SimpleHiDPI …". With the lid open, macOS also
+mirrors the built-in display. Change sizes from the menu, not from those
+entries.
 
 ## Limitations
 
 - Relies on undocumented macOS display APIs; it may break on any OS update and
   cannot be shipped through the App Store.
-- Changing size re-creates the virtual display (a brief flicker).
+- Changing size re-creates the virtual display (a brief flicker). So does
+  restoring the refresh rate if macOS drops a mirrored panel to a lower one.
 - Quitting the app does not by itself restore the panel's mode; use Disable or
   Restore Defaults first.
 
@@ -73,7 +82,7 @@ virtual display, and put the panel back in its previous mode.
 swift build
 swift run SelfTest   # hardware-free checks (Command Line Tools only)
 swift test           # XCTest suite (needs full Xcode)
-swift run LiveProbe dump   # prints every display and its modes
+swift run LiveProbe dump   # every display, its modes, and the timing sent over the cable
 ```
 
 `LiveProbe test <displayID> <w> <h>` mirrors the display at a size for about

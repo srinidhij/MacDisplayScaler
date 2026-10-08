@@ -5,7 +5,8 @@ import Foundation
 /// Live display discovery using ONLY public APIs:
 /// CGGetOnlineDisplayList (not Active: a mirror slave, i.e. the physical panel
 /// while the private virtual is up, is online but inactive), CGDisplayVendorNumber/ModelNumber/SerialNumber,
-/// CGDisplayPixelsWide/High, CGMainDisplayID, NSScreen for human names.
+/// the native-flagged display mode for the panel's resolution, CGMainDisplayID,
+/// CGDisplayIsBuiltin, NSScreen for human names.
 public final class DisplayDetector: DisplayDetecting, Sendable {
     public init() {}
 
@@ -21,15 +22,19 @@ public final class DisplayDetector: DisplayDetecting, Sendable {
         }
         let mainID = CGMainDisplayID()
         return ids.prefix(Int(fetched)).map { id in
-            DisplayInfo(
+            // CGDisplayPixelsWide is the current "looks like" width: 2560 for
+            // the Dell while it mirrors a 2560x1080 virtual.
+            let native = DisplayModeManager.nativeModes(for: id).first
+            return DisplayInfo(
                 id: id,
                 name: displayName(for: id) ?? "Display \(id)",
                 vendorNumber: vendorNumber(for: id),
                 modelNumber: modelNumber(for: id),
                 serialNumber: serialNumber(for: id),
-                nativePixelWidth: Int(CGDisplayPixelsWide(id)),
-                nativePixelHeight: Int(CGDisplayPixelsHigh(id)),
-                isMain: id == mainID
+                nativePixelWidth: native?.pixelWidth ?? Int(CGDisplayPixelsWide(id)),
+                nativePixelHeight: native?.pixelHeight ?? Int(CGDisplayPixelsHigh(id)),
+                isMain: id == mainID,
+                isBuiltin: CGDisplayIsBuiltin(id) != 0
             )
         }
     }

@@ -112,6 +112,44 @@ check(multi.filter { $0.looksLikeDellU3425WE }.map(\.id) == [2], "ident: multi-d
 check(!DisplayInfo(id: 1, name: "Built-in", nativePixelWidth: 3440, nativePixelHeight: 1440, isMain: true).isLikelyExternalUltrawide,
       "ident: main never counts as external")
 
+// MARK: - Saved default target
+
+let builtinPanel = DisplayInfo(id: 1, name: "Built-in Retina Display", vendorNumber: 0x610, modelNumber: 0xA050, serialNumber: 1,
+                               nativePixelWidth: 2940, nativePixelHeight: 1912, isMain: true, isBuiltin: true)
+// While mirrored the Dell has no screen name; it is found by vendor + native size.
+let dellPanel = DisplayInfo(id: 3, name: "Display 3", vendorNumber: 0x10AC, modelNumber: 0xA243, serialNumber: 808736844,
+                            nativePixelWidth: 3440, nativePixelHeight: 1440)
+let ownVirtual = DisplayInfo(id: 4, name: "SimpleHiDPI 3", vendorNumber: 0x5348, modelNumber: 0x4849,
+                             nativePixelWidth: 5120, nativePixelHeight: 2160)
+check(dellPanel.isDellUWQHD, "ident: mirrored Dell with a generic name still matches")
+// SelfTest's own defaults domain; clearing the size at the end removes every key.
+let defaultStore = PrivateDefaultStore()
+defaultStore.size = nil
+check(defaultStore.target(in: [builtinPanel, dellPanel]) == nil, "savedDefault: nothing saved targets nothing")
+defaultStore.size = (2560, 1080)
+check(defaultStore.target(in: [builtinPanel, dellPanel])?.id == 3, "savedDefault: legacy default belongs to the Dell")
+check(defaultStore.target(in: [builtinPanel, ownVirtual]) == nil, "savedDefault: never the built-in or a virtual")
+defaultStore.displayKey = dellPanel.identityKey
+let dellNewID = DisplayInfo(id: 9, name: "DELL U3425WE", vendorNumber: 0x10AC, modelNumber: 0xA243, serialNumber: 808736844,
+                            nativePixelWidth: 3440, nativePixelHeight: 1440)
+check(defaultStore.target(in: [builtinPanel, dellNewID])?.id == 9, "savedDefault: follows the panel across display IDs")
+let otherDell = DisplayInfo(id: 5, name: "DELL U3425WE", vendorNumber: 0x10AC, modelNumber: 0xA243, serialNumber: 1234,
+                            nativePixelWidth: 3440, nativePixelHeight: 1440)
+check(defaultStore.target(in: [builtinPanel, otherDell]) == nil, "savedDefault: another panel of the same model is not the target")
+defaultStore.size = nil
+check(defaultStore.displayKey == nil, "savedDefault: clearing the size clears its display")
+
+// MARK: - Display changes
+
+check(PrivateHiDPIGateway.reconcileAction(online: false, mirrorsVirtual: false, belowNativeRefresh: false) == .teardownPanelGone,
+      "reconcile: panel gone tears down")
+check(PrivateHiDPIGateway.reconcileAction(online: true, mirrorsVirtual: false, belowNativeRefresh: false) == .teardownUnmirrored,
+      "reconcile: panel no longer mirroring tears down")
+check(PrivateHiDPIGateway.reconcileAction(online: true, mirrorsVirtual: true, belowNativeRefresh: true) == .recreateForRefresh,
+      "reconcile: slow refresh re-creates")
+check(PrivateHiDPIGateway.reconcileAction(online: true, mirrorsVirtual: true, belowNativeRefresh: false) == nil,
+      "reconcile: healthy pair is left alone")
+
 // MARK: - Rollback
 
 let rb = RollbackManager()

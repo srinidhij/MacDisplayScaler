@@ -46,7 +46,14 @@ final class MenuBarViewModel: ObservableObject {
     private let rollback: RollbackManaging
     private var timer: Timer?
     private var pendingPrevious: DisplayModeInfo?
-    private var didAutoEnableThisLaunch = false
+    /// Apply the saved default at the next chance: set at launch and when its
+    /// display reconnects, cleared by applying it or by any explicit user action.
+    private var autoApplyPending = true
+    private var savedTargetWasOnline = false
+    private var settleTask: Task<Void, Never>?
+    /// Panels a re-create did not bring back to native refresh (e.g. a cable or
+    /// hub limit). Not retried until they reconnect, so changes don't flicker.
+    private var refreshRetryBlocked: Set<UInt32> = []
     private let defaultStore = PrivateDefaultStore()
 
     init(
@@ -64,10 +71,17 @@ final class MenuBarViewModel: ObservableObject {
         savedDefaultSize = defaultStore.size
         refreshLaunchAtLogin()
         refresh()
+        savedTargetWasOnline = defaultStore.target(in: displays) != nil
+        // The view model lives as long as the app, so the unretained pointer stays valid.
+        CGDisplayRegisterReconfigurationCallback({ _, flags, userInfo in
+            guard !flags.contains(.beginConfigurationFlag), let userInfo else { return }
+            let model = Unmanaged<MenuBarViewModel>.fromOpaque(userInfo).takeUnretainedValue()
+            Task { @MainActor in model.displaysChanged() }
+        }, Unmanaged.passUnretained(self).toOpaque())
         // At login the displays may not be up yet; retry once.
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 4_000_000_000)
-            if !self.didAutoEnableThisLaunch { self.refresh() }
+            if self.autoApplyPending { self.refresh() }
         }
     }
 
@@ -217,6 +231,7 @@ final class MenuBarViewModel: ObservableObject {
 
     func restoreDefaults() {
         guard let id = selectedDisplayID else { return }
+        autoApplyPending = false
         // Kill-switch first: unmirror + destroy any private virtual for this display.
         if PrivateHiDPIGateway.virtualDisplay(forPhysical: id) != nil {
             PrivateHiDPIGateway.disable(physicalDisplayID: id)
@@ -235,6 +250,7 @@ final class MenuBarViewModel: ObservableObject {
         stopCountdown()
         if let size = selectedDisplayID.flatMap({ PrivateHiDPIGateway.activeSize(forPhysical: $0) }) {
             defaultStore.size = size
+            defaultStore.displayKey = selectedDisplay?.identityKey
             savedDefaultSize = size
             statusMessage = "Kept and saved as default (\(size.width)×\(size.height)); it will be applied at every launch."
         } else {
@@ -266,6 +282,7 @@ final class MenuBarViewModel: ObservableObject {
     }
 
     func togglePrivateOptIn() {
+        autoApplyPending = false
         let next = !PrivateHiDPIGateway.optInEnabled
         PrivateHiDPIGateway.setOptIn(next)
         AppLogger.shared.info("private prototype opt-in=\(next)")
@@ -284,6 +301,7 @@ final class MenuBarViewModel: ObservableObject {
     ///   user already confirmed, so it runs without the Keep countdown.
     func enablePrivatePrototype(savedDefault: (width: Int, height: Int)? = nil) {
         guard let id = selectedDisplayID else { return }
+        if savedDefault == nil { autoApplyPending = false }
         guard PrivateHiDPIGateway.optInEnabled else {
             statusMessage = "Enable the opt-in toggle first."
             return
@@ -344,6 +362,7 @@ final class MenuBarViewModel: ObservableObject {
     func saveCurrentAsDefault() {
         guard let id = selectedDisplayID, let size = PrivateHiDPIGateway.activeSize(forPhysical: id) else { return }
         defaultStore.size = size
+        defaultStore.displayKey = selectedDisplay?.identityKey
         savedDefaultSize = size
         statusMessage = "Saved \(size.width)×\(size.height) as the default for every launch."
     }
@@ -425,6 +444,7 @@ final class MenuBarViewModel: ObservableObject {
 
     func disablePrivatePrototype() {
         guard let id = selectedDisplayID else { return }
+        autoApplyPending = false
         PrivateHiDPIGateway.disable(physicalDisplayID: id)
         AppLogger.shared.info("display=\(id) private prototype disabled (kill-switch)")
         rollback.confirm()
@@ -433,20 +453,100 @@ final class MenuBarViewModel: ObservableObject {
         refresh()
     }
 
-    /// Auto-apply once per launch (so also at login) the size the user last
-    /// confirmed with Keep. Needs the opt-in and a saved default; with no saved
-    /// default nothing happens, so an unconfirmed size is never auto-applied.
+    /// Auto-apply the size the user last confirmed with Keep, at launch (so also
+    /// at login) and when its display reconnects. Only to the display it was
+    /// confirmed on; with no saved default nothing happens, so an unconfirmed
+    /// size is never auto-applied.
     private func maybeAutoEnablePrivate() {
-        guard !didAutoEnableThisLaunch, let saved = defaultStore.size else { return }
+        guard autoApplyPending, let saved = defaultStore.size,
+              let target = defaultStore.target(in: displays) else { return }
+        if PrivateHiDPIGateway.virtualDisplay(forPhysical: target.id) != nil {
+            autoApplyPending = false
+            return
+        }
         guard PrivateHiDPIGateway.optInEnabled,
               PrivateHiDPIGateway.isAvailable,
-              let id = selectedDisplayID,
-              PrivateHiDPIGateway.virtualDisplay(forPhysical: id) == nil,
               !rollback.isArmed,
-              countdown == 0 else { return }
-        if PrivateHiDPIGateway.activeMap.values.contains(id) { return } // never target a virtual display
-        didAutoEnableThisLaunch = true
+              countdown == 0,
+              !privateBusy else { return }
+        autoApplyPending = false
+        if defaultStore.displayKey == nil { defaultStore.displayKey = target.identityKey }
+        selectedDisplayID = target.id
         enablePrivatePrototype(savedDefault: saved)
+    }
+
+    // MARK: - Display changes
+
+    /// Reconfigurations arrive in bursts (wake, hot-plug, our own mirror
+    /// changes), so act once they have been quiet for a moment.
+    func displaysChanged() {
+        settleTask?.cancel()
+        settleTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard !Task.isCancelled else { return }
+            self.displaysSettled()
+        }
+    }
+
+    private func displaysSettled() {
+        // A create or size switch is reconfiguring right now; look again after it.
+        guard !privateBusy else { displaysChanged(); return }
+        for physical in PrivateHiDPIGateway.activeMap.keys {
+            reconcile(physical: physical)
+        }
+        manager.refreshDisplays()
+        let targetOnline = defaultStore.target(in: manager.displays) != nil
+        if targetOnline, !savedTargetWasOnline { autoApplyPending = true }
+        savedTargetWasOnline = targetOnline
+        refresh()
+    }
+
+    private func reconcile(physical: UInt32) {
+        guard let action = PrivateHiDPIGateway.reconcileAction(forPhysical: physical) else { return }
+        AppLogger.shared.info("display=\(physical) display change: \(action)")
+        switch action {
+        case .teardownPanelGone, .teardownUnmirrored:
+            PrivateHiDPIGateway.disable(physicalDisplayID: physical)
+            rollback.confirm() // an unconfirmed size is dropped, never re-applied
+            stopCountdown()
+            refreshRetryBlocked.remove(physical)
+            statusMessage = action == .teardownPanelGone
+                ? "Display disconnected — virtual display removed."
+                : "Display stopped mirroring — virtual display removed."
+        case .recreateForRefresh:
+            guard !refreshRetryBlocked.contains(physical), !rollback.isArmed,
+                  let size = PrivateHiDPIGateway.activeSize(forPhysical: physical) else { return }
+            recreateForRefresh(physical: physical, size: size)
+        }
+    }
+
+    /// Same size, so no Keep countdown; `enable()` switches the panel to its
+    /// fastest native mode before mirroring again.
+    private func recreateForRefresh(physical: UInt32, size: (width: Int, height: Int)) {
+        privateBusy = true
+        statusMessage = "Restoring the refresh rate…"
+        Task {
+            let (result, healthy) = await Task.detached(priority: .userInitiated) {
+                let result = PrivateHiDPIGateway.enable(physicalDisplayID: physical, logicalWidth: size.width, logicalHeight: size.height)
+                guard case .success = result else { return (result, false) }
+                try? await Task.sleep(nanoseconds: 2_000_000_000) // let the mirror settle before measuring
+                return (result, PrivateHiDPIGateway.reconcileAction(forPhysical: physical) == nil)
+            }.value
+            self.privateBusy = false
+            switch result {
+            case .success where !healthy:
+                self.refreshRetryBlocked.insert(physical)
+                AppLogger.shared.info("display=\(physical) refresh still below native after re-create; not retrying")
+                self.statusMessage = "The display stays below its native refresh rate."
+            case .success:
+                AppLogger.shared.info("display=\(physical) refresh restored by re-create")
+                self.statusMessage = "Refresh rate restored."
+            case .failure(let e):
+                AppLogger.shared.error("display=\(physical) refresh re-create failed: \(e)")
+                self.statusMessage = "Couldn't restore the refresh rate: \(e). Panel restored."
+            }
+            self.refresh()
+        }
     }
 
     private func startPrivateCountdown(physicalID: CGDirectDisplayID, virtualID: CGDirectDisplayID, previous: DisplayModeInfo?, isEnableRollback: Bool = false) {
@@ -591,7 +691,7 @@ struct MenuBarView: View {
                 }
 
                 if viewModel.privateModeActive {
-                    Text("Private virtual active — panel timing stays 3440×1440, UI renders at 2x (60 Hz cap).")
+                    Text("Private virtual active — panel timing stays 3440×1440, UI renders at 2x.")
                         .font(.caption).foregroundStyle(.purple)
                 }
 
@@ -643,7 +743,7 @@ struct MenuBarView: View {
                      : "Private API not present on this macOS build.")
                     .font(.caption).foregroundStyle(.secondary)
                 if !viewModel.privateOptIn {
-                    Text("Off by default. Uses private virtual-display APIs + mirroring. Breaks on OS updates, no App Store, 60 Hz cap.")
+                    Text("Off by default. Uses private virtual-display APIs + mirroring. Breaks on OS updates, no App Store.")
                         .font(.caption).foregroundStyle(.secondary)
                     Button("Enable private prototype opt-in") { viewModel.togglePrivateOptIn() }
                 } else {

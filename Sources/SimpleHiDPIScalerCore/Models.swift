@@ -9,9 +9,12 @@ public struct DisplayInfo: Identifiable, Equatable, Hashable, Sendable {
     public let vendorNumber: UInt32?
     public let modelNumber: UInt32?
     public let serialNumber: UInt32?
+    /// The panel's own resolution, independent of the current mode (a panel
+    /// mirroring our virtual reports the scaled "looks like" size as current).
     public let nativePixelWidth: Int
     public let nativePixelHeight: Int
     public let isMain: Bool
+    public let isBuiltin: Bool
 
     public var sadlyID: String { String(id) }
 
@@ -23,7 +26,8 @@ public struct DisplayInfo: Identifiable, Equatable, Hashable, Sendable {
         serialNumber: UInt32? = nil,
         nativePixelWidth: Int,
         nativePixelHeight: Int,
-        isMain: Bool = false
+        isMain: Bool = false,
+        isBuiltin: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -33,6 +37,13 @@ public struct DisplayInfo: Identifiable, Equatable, Hashable, Sendable {
         self.nativePixelWidth = nativePixelWidth
         self.nativePixelHeight = nativePixelHeight
         self.isMain = isMain
+        self.isBuiltin = isBuiltin
+    }
+
+    /// Identifies the same panel across reconnects and display-ID changes
+    /// (EDID vendor, model and serial).
+    public var identityKey: String {
+        "\(vendorNumber ?? 0)-\(modelNumber ?? 0)-\(serialNumber ?? 0)"
     }
 
     // MARK: - Identification

@@ -11,7 +11,7 @@ use and `ARCHITECTURE.md` for the pipeline.
 swift build                          # all targets
 swift run SelfTest                   # hardware-free checks (works with Command Line Tools)
 swift test                           # XCTest; fails here: full Xcode is not installed
-swift run LiveProbe dump             # list displays + modes (read-only)
+swift run LiveProbe dump             # list displays + modes (read-only); link= is the timing sent over the cable
 swift run LiveProbe test <id> <w> <h>   # live mirror test, then teardown + restore
 swift run LiveProbe restore <id> [max]  # put panel back to native 3440x1440 (max = fastest refresh)
 scripts/build-app.sh --install       # build + ad-hoc sign ~/Applications/SimpleHiDPIScaler.app
@@ -40,8 +40,21 @@ panel at the wrong mode.
   does not restore a mirrored panel by itself.
 - The virtual's mode list can't be switched while mirrored; a size change is
   `disable()` + `enable()` with only the new size.
-- Mirroring keeps 120 Hz only if the panel is already at 120 Hz first; `enable()`
-  raises it.
+- Mirroring keeps 120 Hz only if the panel already runs at 120 Hz; `enable()`
+  first switches it to its fastest native mode. A mirrored panel's mode can't be
+  changed in place (the configuration is refused), so raising its refresh later
+  is `disable()` + `enable()`.
+- Check sharpness and refresh with `link=` in `LiveProbe dump`: mirrored at any
+  size it should read 3440x1440 at 120 Hz. The CG mode only shows the looks-like
+  size. After a quit, macOS leaves the panel at a plain 2560×1080 mode.
+- The panel's native size comes from its native-flagged mode
+  (`DisplayModeManager.nativeModes`); `CGDisplayPixelsWide` is the current
+  looks-like size.
+- The app handles display changes 3 s after the last one: it tears the virtual
+  down when its panel goes offline or stops mirroring it, re-creates once when a
+  mirrored panel runs below its native refresh, and re-applies the saved default
+  when that panel comes back. Other displays joining the mirror (the built-in
+  panel when the lid opens) are left alone.
 - A mirrored panel is `active=false` but still online: enumerate with
   `CGGetOnlineDisplayList`, never the active list.
 - Identify our virtual display by vendor `0x5348` / model `0x4849`
@@ -55,7 +68,8 @@ panel at the wrong mode.
   dependencies. Update `SECURITY.md` / `PRIVACY.md` if that ever changes.
 - Keep docs as current-state reference: no history, post-mortems or "observed
   live" notes.
-- The only auto-applied display state is a size the user confirmed with Keep.
+- The only auto-applied display state is a size the user confirmed with Keep,
+  and only on the display it was confirmed on.
 - Every manual change gets the 30 s Keep/rollback window (`keepTimeoutSeconds`).
 
 ## Environment gotchas

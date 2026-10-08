@@ -23,7 +23,8 @@ import PrivateBridge
 /// - App Store rejection; notarization scrutinized.
 /// - It IS a virtual display + mirroring (originally excluded; now allowed only
 ///   as an explicitly approved prototype).
-/// - Virtual path typically capped at 60 Hz (panel's 120 Hz is lost while active).
+/// - The panel keeps its fastest native refresh only when it runs at it before
+///   mirroring; `enable()` switches it there first.
 /// - Kill-switch: disabling destroys the virtual display and unmirrors.
 public enum PrivateHiDPIError: Error, Equatable {
     case optInRequired
@@ -33,6 +34,19 @@ public enum PrivateHiDPIError: Error, Equatable {
 
     /// Back-compat with the public-only stub: opt-in off surfaces as refusal.
     public static let refusedPrivateAPI = PrivateHiDPIError.optInRequired
+}
+
+/// What to do about an active virtual once display changes have settled.
+public enum PrivateReconcileAction: Equatable, Sendable {
+    /// The panel went offline (unplugged, powered off, input switched). The
+    /// virtual would otherwise stay behind as an invisible extended display.
+    case teardownPanelGone
+    /// The panel is online but no longer mirrors our virtual (changed in System
+    /// Settings): same invisible-display risk.
+    case teardownUnmirrored
+    /// Still mirrored, but the panel runs below its fastest native refresh
+    /// (macOS restored a slower configuration). Re-creating raises it again.
+    case recreateForRefresh
 }
 
 public struct PrivateHiDPIResult: Sendable, Equatable {
@@ -75,16 +89,43 @@ public enum PrivateHiDPIGateway: Sendable {
         return _sizes[physical]
     }
 
-    /// Highest-refresh native (1x) mode with the panel's current pixel size.
-    /// Mirroring a 120 Hz-capable panel only keeps 120 Hz when the panel is
-    /// already at 120 Hz beforehand (verified live), else the pair sticks at 60.
+    /// Highest-refresh mode at the panel's native resolution. Mirroring keeps
+    /// 120 Hz only when the panel already runs at 120 Hz beforehand, else the
+    /// pair sticks at 60. The current mode is not a usable starting point: after
+    /// a quit macOS leaves the panel at a 1x "looks like" size (2560x1080),
+    /// whose fastest refresh is 60 Hz.
     static func fastestNativeMode(for id: CGDirectDisplayID) -> CGDisplayMode? {
-        guard let cur = CGDisplayCopyDisplayMode(id) else { return nil }
-        let all = (CGDisplayCopyAllDisplayModes(id, nil) as? [CGDisplayMode]) ?? []
-        return all
-            .filter { $0.pixelWidth == cur.pixelWidth && $0.pixelHeight == cur.pixelHeight
-                && $0.width == $0.pixelWidth && $0.isUsableForDesktopGUI() }
-            .max { $0.refreshRate < $1.refreshRate }
+        DisplayModeManager.nativeModes(for: id).max { $0.refreshRate < $1.refreshRate }
+    }
+
+    /// Decision behind `reconcileAction(forPhysical:)`, separated for tests.
+    public static func reconcileAction(
+        online: Bool,
+        mirrorsVirtual: Bool,
+        belowNativeRefresh: Bool
+    ) -> PrivateReconcileAction? {
+        if !online { return .teardownPanelGone }
+        if !mirrorsVirtual { return .teardownUnmirrored }
+        return belowNativeRefresh ? .recreateForRefresh : nil
+    }
+
+    /// Checks an active physical/virtual pair against the live display state.
+    /// nil when nothing is active for `physical` or the pair is healthy.
+    public static func reconcileAction(forPhysical physical: UInt32) -> PrivateReconcileAction? {
+        guard let virtual = virtualDisplay(forPhysical: physical) else { return nil }
+        let id = CGDirectDisplayID(physical)
+        var count: UInt32 = 0
+        var ids = [CGDirectDisplayID](repeating: 0, count: 32)
+        let online = CGGetOnlineDisplayList(32, &ids, &count) == .success && ids.prefix(Int(count)).contains(id)
+        var below = false
+        if online, let cur = CGDisplayCopyDisplayMode(id), let fast = fastestNativeMode(for: id) {
+            below = cur.refreshRate + 0.5 < fast.refreshRate
+        }
+        return reconcileAction(
+            online: online,
+            mirrorsVirtual: online && CGDisplayMirrorsDisplay(id) == CGDirectDisplayID(virtual),
+            belowNativeRefresh: below
+        )
     }
 
     // MARK: - Opt-in (default OFF)
@@ -198,7 +239,9 @@ public enum PrivateHiDPIGateway: Sendable {
         }
         let did = CGDirectDisplayID(physicalDisplayID)
         let savedMode = CGDisplayCopyDisplayMode(did)
-        if let fast = fastestNativeMode(for: did), let cur = savedMode, fast.refreshRate > cur.refreshRate {
+        if let fast = fastestNativeMode(for: did), let cur = savedMode,
+           cur.width != fast.width || cur.pixelWidth != fast.pixelWidth || cur.refreshRate < fast.refreshRate
+        {
             _ = CGDisplaySetDisplayMode(did, fast, nil)
             Thread.sleep(forTimeInterval: 1.0)
         }
@@ -324,8 +367,8 @@ public enum PrivateHiDPIGateway: Sendable {
         display via private CoreGraphics APIs (CGVirtualDisplayDescriptor et \
         al., runtime-resolved) and mirrors the physical display onto it with \
         the public CGConfigureDisplayMirrorOfDisplay; the DCP downsamples 2x \
-        to the panel. Breaks on OS updates, no App Store, typically 60 Hz cap, \
-        kill-switch destroys the virtual display and unmirrors.
+        to the panel. Breaks on OS updates, no App Store, kill-switch destroys \
+        the virtual display and unmirrors.
         """
     }
 }

@@ -24,9 +24,10 @@ public final class DisplayManager: DisplayManaging, @unchecked Sendable {
         self.logger = logger
         refreshDisplays()
         // Capture the launch-time mode once so "Restore Defaults" is the
-        // mode macOS had before we touched anything.
+        // mode macOS had before we touched anything. Taken from an external
+        // panel: the built-in display's mode means nothing on the Dell.
         if store.launchDefaultMode == nil,
-           let first = cached.first,
+           let first = cached.first(where: { !$0.isOwnVirtual && !$0.isBuiltin }),
            let current = modes.currentMode(for: first.id)
         {
             var mutableStore = store
